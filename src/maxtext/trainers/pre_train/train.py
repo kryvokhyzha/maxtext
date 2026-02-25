@@ -57,6 +57,7 @@ from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common.metric_logger import MetricLogger, record_activation_metrics
 from maxtext.optimizers.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.trainers.post_train.dpo.dpo_utils import _merge_dpo_state, _split_dpo_state, dpo_loss_fn
+from tunix.sft.losses import dft_rescale
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -147,6 +148,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
           config.shard_mode,
           debug_sharding=config.debug_sharding,
       )
+      if config.use_dft_loss:
+        xent = dft_rescale(xent)
       # Mask out paddings at the end of each example.
       xent = xent * (data["targets_segmentation"] != 0)
       total_loss = jnp.sum(xent)
@@ -166,6 +169,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
     xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
     xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+    if config.use_dft_loss:
+      xent = dft_rescale(xent)
     # Mask out paddings at the end of each example.
     xent = xent * (data["targets_segmentation"] != 0)
     total_loss = jnp.sum(xent)
