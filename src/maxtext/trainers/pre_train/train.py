@@ -44,7 +44,7 @@ from MaxText.common_types import ShardMode
 from MaxText.globals import EPS
 
 from MaxText.gradient_accumulation import gradient_accumulation_loss_and_grad
-from MaxText.vocabulary_tiling import vocab_tiling_linen_loss
+from MaxText.vocabulary_tiling import vocab_tiling_linen_loss, vocab_tiling_nnx_loss
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from maxtext.common import checkpointing, profiler
@@ -161,12 +161,17 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
         decoder_target_mask=data["targets_segmentation"],
     )
     intermediate_outputs = {}
-    one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-    xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
-    xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-    # Mask out paddings at the end of each example.
-    xent = xent * (data["targets_segmentation"] != 0)
-    total_loss = jnp.sum(xent)
+
+    if config.num_vocab_tiling > 1:
+      hidden_states = model.hidden_states
+      total_loss = vocab_tiling_nnx_loss(hidden_states, data, config, model, is_train)
+    else:
+      one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
+      xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets)
+      xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
+      # Mask out paddings at the end of each example.
+      xent = xent * (data["targets_segmentation"] != 0)
+      total_loss = jnp.sum(xent)
 
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide total_loss

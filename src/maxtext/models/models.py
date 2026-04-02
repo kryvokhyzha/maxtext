@@ -392,6 +392,19 @@ class Transformer(nnx.Module):
     """A no-op method to allow the model to be used in a lazy context."""
     return
 
+  def logits_from_hidden_states(self, hidden_states, deterministic, model_mode):
+    """Compute logits from hidden states (wrapping decoder.apply_output_head).
+
+    This function is used for vocabulary tiling in NNX models.
+    """
+    logits = self.decoder.apply_output_head(
+        shared_embedding=self.token_embedder,
+        y=hidden_states,
+        deterministic=deterministic,
+        model_mode=model_mode,
+    )
+    return logits
+
   def init_cache(self, cache_size: int, batch_size: int, dtype=jnp.float32):
     """Initializes the KV cache for the Transformer.
 

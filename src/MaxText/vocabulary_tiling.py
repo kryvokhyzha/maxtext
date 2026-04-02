@@ -25,8 +25,115 @@ from MaxText.sharding import (
     all_gather_over_fsdp,
     create_sharding,
 )
-from MaxText.common_types import ShardMode
+from MaxText.common_types import MODEL_MODE_TRAIN, ShardMode
 from maxtext.utils import max_utils
+
+
+def vocab_tiling_nnx_loss(
+    hidden_states,
+    data,
+    config,
+    model,
+    is_train,
+):
+  """Calculates cross-entropy loss using vocab tiling for NNX models.
+
+  This function implements a memory-efficient approach for calculating loss when the
+  vocabulary is too large to fit in memory. Unlike the Linen version, it uses the NNX
+  model's stateful interface to compute logits from hidden states per chunk.
+
+  Args:
+    hidden_states: The final hidden states from the decoder, stored on model.hidden_states.
+    data: A dictionary containing the input data, including 'targets' and 'targets_segmentation'.
+    config: The model and training configuration.
+    model: The NNX model instance.
+    is_train: A boolean indicating if the model is in training mode.
+
+  Returns:
+    The total cross-entropy loss computed via vocab tiling.
+  """
+  labels = data["targets"]
+  segmentation = data["targets_segmentation"]
+  deterministic = not config.enable_dropout if is_train else True
+  model_mode = MODEL_MODE_TRAIN
+
+  mesh = model.mesh
+
+  hidden_spec = create_sharding(
+      mesh,
+      ("activation_embed_and_logits_batch", "activation_length_no_exp", "activation_embed"),
+  )
+  label_spec = create_sharding(
+      mesh,
+      ("activation_embed_and_logits_batch", "activation_length_no_exp"),
+  )
+  reshaped_hidden_spec = create_sharding(
+      mesh,
+      ("num_tile", "activation_embed_and_logits_batch_sequence", "activation_embed"),
+  )
+  reshaped_data_spec = create_sharding(
+      mesh,
+      ("num_tile", "activation_embed_and_logits_batch_sequence"),
+  )
+  chunked_hidden_spec = create_sharding(
+      mesh,
+      ("activation_embed_and_logits_batch_sequence", "activation_embed"),
+  )
+  chunked_data_spec = create_sharding(
+      mesh,
+      ("activation_embed_and_logits_batch_sequence",),
+  )
+  chunked_logits_spec = create_sharding(
+      mesh,
+      ("activation_embed_and_logits_batch_sequence", "activation_vocab"),
+  )
+
+  _maybe_shard_with_name = functools.partial(
+      maybe_shard_with_name, shard_mode=config.shard_mode, debug_sharding=config.debug_sharding
+  )
+
+  def _reshape(inputs, out_shape, out_sharding):
+    reshape_out_sharding = out_sharding if config.shard_mode == ShardMode.EXPLICIT else None
+    inputs = jax.lax.reshape(inputs, out_shape, out_sharding=reshape_out_sharding)
+    return _maybe_shard_with_name(inputs, out_sharding)
+
+  hidden_states = _maybe_shard_with_name(hidden_states, hidden_spec)
+  labels = _maybe_shard_with_name(labels, label_spec)
+  segmentation = _maybe_shard_with_name(segmentation, label_spec)
+
+  def _compute_chunk_logits(hidden_chunk):
+    """Compute logits for a single chunk using the NNX model's decoder."""
+    return model.logits_from_hidden_states(hidden_chunk, deterministic, model_mode)
+
+  batch_size, seq_len, emb_dim = hidden_states.shape
+  vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
+
+  reshaped_hidden_states = _reshape(
+      hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+  )
+  reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+  reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+
+  def _scan_body(loss_accumulator, chunk_data):
+    hidden_chunk, label_chunk, segmentation_chunk = chunk_data
+    hidden_chunk = _maybe_shard_with_name(hidden_chunk, chunked_hidden_spec)
+    label_chunk = _maybe_shard_with_name(label_chunk, chunked_data_spec)
+    segmentation_chunk = _maybe_shard_with_name(segmentation_chunk, chunked_data_spec)
+
+    chunk_logits = _compute_chunk_logits(hidden_chunk)
+    chunk_logits = _maybe_shard_with_name(chunk_logits, chunked_logits_spec)
+    one_hot_label_chunk = jax.nn.one_hot(label_chunk, config.vocab_size)
+    chunk_xent, _ = max_utils.cross_entropy_with_logits(chunk_logits, one_hot_label_chunk)
+    masked_xent = jnp.sum(chunk_xent * (segmentation_chunk != 0))
+    loss_accumulator += masked_xent
+    return loss_accumulator, None
+
+  initial_loss = 0.0
+  total_loss, _ = jax.lax.scan(
+      _scan_body, initial_loss, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
+  )
+
+  return total_loss
 
 
 def vocab_tiling_linen_loss(
