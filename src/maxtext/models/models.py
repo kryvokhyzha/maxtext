@@ -396,12 +396,16 @@ class Transformer(nnx.Module):
     """Compute logits from hidden states (wrapping decoder.apply_output_head).
 
     This function is used for vocabulary tiling in NNX models.
+    Passes rngs={} to bypass NNX RNG state mutation, making it safe to call
+    inside jax.lax.scan. The caller should use deterministic=True to avoid
+    needing dropout RNGs.
     """
     logits = self.decoder.apply_output_head(
         shared_embedding=self.token_embedder,
         y=hidden_states,
         deterministic=deterministic,
         model_mode=model_mode,
+        rngs={},
     )
     return logits
 

@@ -54,7 +54,6 @@ def vocab_tiling_nnx_loss(
   """
   labels = data["targets"]
   segmentation = data["targets_segmentation"]
-  deterministic = not config.enable_dropout if is_train else True
   model_mode = MODEL_MODE_TRAIN
 
   mesh = model.mesh
@@ -102,8 +101,12 @@ def vocab_tiling_nnx_loss(
   segmentation = _maybe_shard_with_name(segmentation, label_spec)
 
   def _compute_chunk_logits(hidden_chunk):
-    """Compute logits for a single chunk using the NNX model's decoder."""
-    return model.logits_from_hidden_states(hidden_chunk, deterministic, model_mode)
+    """Compute logits for a single chunk using the NNX model's decoder.
+
+    Uses deterministic=True because the output head is called inside jax.lax.scan
+    where no dropout RNGs are available (matching the Linen vocab tiling behavior).
+    """
+    return model.logits_from_hidden_states(hidden_chunk, deterministic=True, model_mode=model_mode)
 
   batch_size, seq_len, emb_dim = hidden_states.shape
   vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
