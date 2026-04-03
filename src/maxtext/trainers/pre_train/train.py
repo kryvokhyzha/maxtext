@@ -43,6 +43,7 @@ from maxtext.common.common_types import ShardMode
 from maxtext.utils.globals import EPS
 # Placeholder: internal
 
+from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss
 from maxtext.common import checkpointing, profiler
@@ -184,7 +185,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     )
     intermediate_outputs = {}
 
-    if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+    if config.num_vocab_tiling > 1:
+      hidden_states = model.hidden_states
+      total_loss = vocab_tiling_nnx_loss(hidden_states, data, config, model, is_train)
+      total_z_loss = 0.0
+    elif (config.use_indexer and not config.indexer_sparse_training) and is_train:
       # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
       # The main model parameters are frozen and only the indexer is trained via KL divergence.
       total_loss = 0.0
