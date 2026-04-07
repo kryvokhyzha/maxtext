@@ -390,6 +390,9 @@ class MetricLogger:
         target_seg_ids = sorted(set(int(s) for s in targets_seg[i] if s > 0))
         all_seg_ids = sorted(set(input_seg_ids) | set(target_seg_ids))
         num_docs = len(all_seg_ids)
+        max_docs = self.config.log_text_num_docs
+        if max_docs >= 0:
+          all_seg_ids = all_seg_ids[:max_docs]
         multi_doc = num_docs > 1
 
         for doc_idx, seg_id in enumerate(all_seg_ids):
