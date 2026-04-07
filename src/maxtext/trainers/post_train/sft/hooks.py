@@ -133,6 +133,7 @@ class SFTTrainingHooks(TrainingHooks):
     }
     self.metric_logger.record_train_metrics(metrics, train_step, step_time)
     self.metric_logger.write_metrics(metrics, train_step)
+    self.metric_logger.maybe_log_text_samples(train_ctx.data_hooks.train_batch, train_step)
     del self.train_metadata[train_step - 1]
 
   @override

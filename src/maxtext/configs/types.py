@@ -1164,6 +1164,9 @@ class TrainingLoop(BaseModel):
       description="Total number of training steps. -1 defaults to learning_rate_schedule_steps.",
   )
   log_period: int = Field(100, description="Frequency (in steps) to log metrics and flush Tensorboard.")
+  log_text_period: int = Field(0, description="Log decoded training text samples every N steps. 0 disables text logging.")
+  log_text_num_samples: int = Field(1, ge=1, description="Number of batch rows to decode and log when text logging is active.")
+  log_text_num_tokens: int = Field(64, ge=-1, description="Show first N and last N tokens per document (middle trimmed). -1 shows full sequence.")
   eval_interval: int = Field(
       -1,
       description="Run evaluation every N training steps. -1 disables interval-based evaluation.",

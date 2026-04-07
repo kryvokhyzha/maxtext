@@ -145,6 +145,7 @@ def train_loop(config, recorder, state=None):
         max_utils.print_mem_stats("After params initialized")
 
       metric_logger.buffer_and_write_train_metrics(metrics, step, step_time_delta)
+      metric_logger.maybe_log_text_samples(example_batch, step)
 
     if config.save_checkpoint_on_completion:
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)

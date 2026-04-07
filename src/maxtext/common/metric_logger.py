@@ -324,6 +324,113 @@ class MetricLogger:
     self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
     self.buffered_train_metrics = (step, metrics)
 
+  def _get_tokenizer(self):
+    """Lazily builds and caches the tokenizer for text sample logging."""
+    if not hasattr(self, "_text_tokenizer"):
+      from maxtext.input_pipeline import data_processing_utils
+
+      self._text_tokenizer, _ = data_processing_utils.get_tokenizer_and_pad_id(self.config)
+    return self._text_tokenizer
+
+  @staticmethod
+  def _format_token_view(tokens, num_tokens):
+    """Format token IDs with head+tail trimming."""
+    total = len(tokens)
+    if num_tokens < 0 or total <= 2 * num_tokens:
+      desc = str(total)
+      parts = [str(t) for t in tokens]
+    else:
+      desc = f"{total}, first {num_tokens} + last {num_tokens}"
+      head = [str(t) for t in tokens[:num_tokens]]
+      tail = [str(t) for t in tokens[-num_tokens:]]
+      parts = head + ["..."] + tail
+    return f"[{', '.join(parts)}]", desc
+
+  @staticmethod
+  def _decode_trimmed(tokenizer, tokens, num_tokens):
+    """Decode tokens with head+tail trimming at token boundaries."""
+    if num_tokens < 0 or len(tokens) <= 2 * num_tokens:
+      return tokenizer.decode(tokens)
+    head_text = tokenizer.decode(tokens[:num_tokens])
+    tail_text = tokenizer.decode(tokens[-num_tokens:])
+    return head_text + " ... " + tail_text
+
+  def maybe_log_text_samples(self, batch, step):
+    """Decode and log training text samples to console and TensorBoard."""
+    if self.config.log_text_period <= 0:
+      return
+    if step != 0 and step % self.config.log_text_period != 0:
+      return
+    if jax.process_index() != 0:
+      return
+
+    max_logging.log(f"[TextSample] Logging text samples at step {step} (period={self.config.log_text_period})...")
+
+    try:
+      tokenizer_model = self._get_tokenizer()
+      num_tokens = self.config.log_text_num_tokens
+
+      def _to_np(arr):
+        try:
+          return np.array(arr)
+        except RuntimeError:
+          return np.array(arr.addressable_shards[0].data)
+
+      inputs = _to_np(batch["inputs"])
+      targets = _to_np(batch["targets"])
+      inputs_seg = _to_np(batch["inputs_segmentation"])
+      targets_seg = _to_np(batch["targets_segmentation"])
+      batch_size = inputs.shape[0]
+      num_samples = min(self.config.log_text_num_samples, batch_size)
+
+      tb_parts = []
+
+      for i in range(num_samples):
+        input_seg_ids = sorted(set(int(s) for s in inputs_seg[i] if s > 0))
+        target_seg_ids = sorted(set(int(s) for s in targets_seg[i] if s > 0))
+        all_seg_ids = sorted(set(input_seg_ids) | set(target_seg_ids))
+        num_docs = len(all_seg_ids)
+        multi_doc = num_docs > 1
+
+        for doc_idx, seg_id in enumerate(all_seg_ids):
+          in_mask = inputs_seg[i] == seg_id
+          tgt_mask = targets_seg[i] == seg_id
+          in_tokens = inputs[i][in_mask].tolist()
+          tgt_tokens = targets[i][tgt_mask].tolist()
+
+          if multi_doc:
+            label = f"Step {step} | sample {i} | doc {doc_idx + 1}/{num_docs}"
+          else:
+            label = f"Step {step} | sample {i}"
+
+          in_tok_str, in_tok_desc = self._format_token_view(in_tokens, num_tokens)
+          tgt_tok_str, tgt_tok_desc = self._format_token_view(tgt_tokens, num_tokens)
+
+          in_text = self._decode_trimmed(tokenizer_model, in_tokens, num_tokens) if in_tokens else ""
+          tgt_text = self._decode_trimmed(tokenizer_model, tgt_tokens, num_tokens) if tgt_tokens else ""
+
+          max_logging.log(f"[TextSample] {label}")
+          max_logging.log(f"  input tokens ({in_tok_desc}): {in_tok_str}")
+          max_logging.log(f"  input text: {in_text}")
+          max_logging.log(f"  target tokens ({tgt_tok_desc}): {tgt_tok_str}")
+          max_logging.log(f"  target text: {tgt_text}")
+
+          if multi_doc:
+            tb_parts.append(f"### Sample {i} | Doc {doc_idx + 1}/{num_docs}")
+          else:
+            tb_parts.append(f"### Sample {i}")
+          tb_parts.append(f"**Input tokens** ({in_tok_desc}): `{in_tok_str}`  ")
+          tb_parts.append(f"**Input text**: {in_text}  ")
+          tb_parts.append(f"**Target tokens** ({tgt_tok_desc}): `{tgt_tok_str}`  ")
+          tb_parts.append(f"**Target text**: {tgt_text}  ")
+          tb_parts.append("")
+
+      if self.config.enable_tensorboard and self.writer is not None and tb_parts:
+        self.writer.add_text("text_samples", "\n".join(tb_parts), step)
+
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"[TextSample] WARNING: Failed to log text samples at step {step}: {e}")
+
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
